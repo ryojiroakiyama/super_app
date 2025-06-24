@@ -20,6 +20,7 @@ func main() {
 	}
 	registerGmailRoutes(app)
 	registerTTSRoutes(app)
+	registerMessageTTSEndpoint(app)
 
 	log.Println("🚀  Server listening on http://localhost:8080")
 	if err := app.Listen(":8080"); err != nil {
