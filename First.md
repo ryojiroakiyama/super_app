@@ -34,13 +34,37 @@ README で定義した Gmail × AI 音声変換アプリの **ローカル検証
 
 ---
 
-## Step 4 : Google Cloud Text-to-Speech (TTS) Quickstart
+## Step 4 : OpenAI Text-to-Speech (TTS) 連携
 
-1. サービスアカウント JSON を取得し、`GOOGLE_APPLICATION_CREDENTIALS` を設定
-2. `tts_client.go` で `Synthesize(text, lang, voice)` を実装
-3. `POST /tts`（body: `text`）→ Base64 エンコードした MP3 バイト列を返す
+1. OpenAI ダッシュボードで **API キー** を発行
+   - `.env` に `OPENAI_API_KEY=sk-...` を入れる **または** ルートに `openai_api_key.txt` を作成してキーを書き込む
+2. `tts_handler.go` で `/tts` エンドポイントを実装（モデル: `tts-1`, デフォルト voice: `alloy`）
+3. `POST /tts`（例）
+   ```json
+   {
+     "text": "こんにちは OpenAI TTS",
+     "voice": "alloy"  // 省略可
+   }
+   ```
+   が Base64 MP3 を返す
 
-👉 curl でテキストを送信し、返ってきた Base64 をデコード → 再生して音声を確認します。
+👉 動作確認手順
+```bash
+# 1. API キーを用意
+echo "sk-xxxx" > openai_api_key.txt   # もしくは環境変数に設定
+
+# 2. サーバー起動
+GOTOOLCHAIN=local go run .
+
+# 3. 音声合成をリクエスト
+curl -X POST http://localhost:8080/tts \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello from OpenAI TTS"}' > resp.json
+
+# 4. mp3 を再生
+jq -r '.audioContent' resp.json | base64 -d > out.mp3
+open out.mp3   # macOS の場合
+```
 
 ---
 
