@@ -14,6 +14,12 @@ func main() {
 		return c.SendString("ok")
 	})
 
+	// Register routes
+	if err := RegisterOAuthRoutes(app); err != nil {
+		log.Printf("failed to register OAuth routes: %v", err)
+	}
+	registerGmailRoutes(app)
+
 	log.Println("🚀  Server listening on http://localhost:8080")
 	if err := app.Listen(":8080"); err != nil {
 		log.Fatalf("failed to start server: %v", err)
