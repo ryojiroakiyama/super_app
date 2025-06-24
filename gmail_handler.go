@@ -19,6 +19,7 @@ type messageSummary struct {
 // registerGmailRoutes sets up /messages endpoint.
 func registerGmailRoutes(app *fiber.App) {
 	app.Get("/messages", listMessagesHandler)
+	app.Get("/messages/latest", latestMessageHandler)
 }
 
 func listMessagesHandler(c *fiber.Ctx) error {
@@ -29,6 +30,9 @@ func listMessagesHandler(c *fiber.Ctx) error {
 			max = v
 		}
 	}
+
+	// Optional Gmail search query
+	q := c.Query("q")
 
 	// Load OAuth2 token
 	tok, err := tokenFromFile()
@@ -52,7 +56,12 @@ func listMessagesHandler(c *fiber.Ctx) error {
 
 	// Call Gmail messages list
 	user := "me"
-	r, err := srv.Users.Messages.List(user).MaxResults(max).LabelIds("INBOX").Do()
+	listCall := srv.Users.Messages.List(user).MaxResults(max).LabelIds("INBOX")
+	if q != "" {
+		listCall = listCall.Q(q)
+	}
+
+	r, err := listCall.Do()
 	if err != nil {
 		log.Printf("unable to retrieve messages: %v", err)
 		return fiber.ErrInternalServerError
@@ -81,4 +90,10 @@ func listMessagesHandler(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"messages": summaries})
+}
+
+func latestMessageHandler(c *fiber.Ctx) error {
+	// Reuse list handler logic with max=1
+	c.Request().URI().QueryArgs().Set("max", "1")
+	return listMessagesHandler(c)
 }
