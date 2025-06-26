@@ -119,7 +119,40 @@ open out.mp3   # macOS
 
 ---
 
-## Step 6 : SQLite + GORM で履歴管理
+## Step 6 : ストリーム再生対応（チャンク転送）
+
+長文メール全文でもメモリ消費を抑えつつ、ブラウザや `curl` でリアルタイム再生できるようにします。
+
+1. `/messages/:id/tts/stream` (GET) を追加
+   - Gmail から本文を取得（Step 5 と同様）
+   - OpenAI TTS を `{"stream": true}` で呼び出す
+   - 生成された MP3 バイト列をチャンク転送 (`Content-Type: audio/mpeg`)
+2. 4096 文字制限を回避するため、本文を 3,000 文字ごとに分割し、チャンクごとに順次リクエスト
+
+👉 動作確認手順
+
+```bash
+# 1. サーバー起動
+GOTOOLCHAIN=local go run .
+
+# 2. メール ID を取得（例は最新 1 通）
+MSG_ID=$(curl -s \
+  "http://localhost:8080/messages/latest" | jq -r '.messages[0].id')
+
+# 3. ブラウザで再生
+open "http://localhost:8080/messages/${MSG_ID}/tts/stream"   # macOS
+
+# もしくは curl でファイル保存
+curl -L "http://localhost:8080/messages/${MSG_ID}/tts/stream?limit=1500" -o out.mp3
+open out.mp3
+```
+
+> **チェックポイント**  
+> ブラウザのネットワークタブで `Transfer-Encoding: chunked` が付いていることを確認し、再生が即時開始されれば成功。
+
+---
+
+## Step 7 : SQLite + GORM で履歴管理
 
 1. `models.go` に `User`, `Message`, `AudioHistory` を定義
 2. `repository.go` で簡易 CRUD 実装
@@ -129,7 +162,7 @@ open out.mp3   # macOS
 
 ---
 
-## Step 7 : Cloud Storage アップロード & 署名付き URL 取得
+## Step 8 : Cloud Storage アップロード & 署名付き URL 取得
 
 1. GCS クライアントを追加し、Step 5 のローカル保存を GCS バケットに置き換え
 2. アップロード後、署名付き URL（Signed URL）を生成し `audioURL` として返す
@@ -138,7 +171,7 @@ open out.mp3   # macOS
 
 ---
 
-## Step 8 : まとめ & 自動テスト／Docker 化（サーバーのみ）
+## Step 9 : まとめ & 自動テスト／Docker 化（サーバーのみ）
 
 1. `docker-compose.yml` を用意し、`app`, `sqlite`（必要なら `gcloud-sdk`）を定義
 2. `Dockerfile`（multi-stage build）でアプリをビルド

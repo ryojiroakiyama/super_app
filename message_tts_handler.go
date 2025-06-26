@@ -15,12 +15,15 @@ import (
 	"strings"
 	"time"
 
+	"bufio"
+
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/api/gmail/v1"
 )
 
 func registerMessageTTSEndpoint(app *fiber.App) {
 	app.Post("/messages/:id/tts", messageToTTSHandler)
+	app.Get("/messages/:id/tts/stream", messageToTTSStreamHandler)
 }
 
 func messageToTTSHandler(c *fiber.Ctx) error {
@@ -91,6 +94,105 @@ func messageToTTSHandler(c *fiber.Ctx) error {
 		"localPath":   filePath,
 		"audioBase64": b64,
 	})
+}
+
+// messageToTTSStreamHandler streams synthesized MP3 back to client using chunked transfer encoding.
+func messageToTTSStreamHandler(c *fiber.Ctx) error {
+	msgID := c.Params("id")
+	if msgID == "" {
+		return fiber.NewError(http.StatusBadRequest, "message id required")
+	}
+
+	// Build gmail service
+	tok, err := tokenFromFile()
+	if err != nil {
+		return fiber.NewError(http.StatusUnauthorized, "authorize first via /auth/google")
+	}
+	ga, err := newGoogleAuth()
+	if err != nil {
+		return fiber.ErrInternalServerError
+	}
+	srv, err := gmailServiceFromToken(context.Background(), tok, ga.config)
+	if err != nil {
+		return fiber.ErrInternalServerError
+	}
+
+	// Fetch full message
+	gm, err := srv.Users.Messages.Get("me", msgID).Format("full").Do()
+	if err != nil {
+		log.Printf("failed to get message: %v", err)
+		return fiber.ErrInternalServerError
+	}
+
+	// Build text
+	bodyText := collectMessageText(gm)
+	if limStr := c.Query("limit"); limStr != "" {
+		if v, err := strconv.Atoi(limStr); err == nil && v > 0 {
+			bodyText = truncateRunes(bodyText, v)
+		}
+	}
+	if len(bodyText) == 0 {
+		return fiber.NewError(fiber.StatusNotFound, "no text content found")
+	}
+
+	// 分割（OpenAI 制限）
+	const maxChars = 3000
+	chunks := splitByRuneCount(bodyText, maxChars)
+
+	// ヘッダ設定
+	c.Set("Content-Type", "audio/mpeg")
+
+	// BodyStreamWriter: チャンクごとに OpenAI へストリーム転送しコピー
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		for idx, ck := range chunks {
+			rc, err := openAITTSStream(ck)
+			if err != nil {
+				log.Printf("openai stream error (chunk %d/%d): %v", idx+1, len(chunks), err)
+				return
+			}
+			_, _ = io.Copy(w, rc)
+			w.Flush()
+			rc.Close()
+		}
+	})
+
+	return nil
+}
+
+// openAITTSStream calls OpenAI with stream=true and returns the response body (caller must Close).
+func openAITTSStream(text string) (io.ReadCloser, error) {
+	apiKey := getOpenAIKey()
+	if apiKey == "" {
+		return nil, fmt.Errorf("openai key missing")
+	}
+	payload := map[string]interface{}{
+		"model":  "tts-1",
+		"input":  text,
+		"voice":  "alloy",
+		"format": "mp3",
+		"stream": true,
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/speech", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	// 長時間ストリームの可能性があるためタイムアウト無しのクライアントを使用
+	httpClient := &http.Client{}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("openai error %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return resp.Body, nil
 }
 
 // extractPlainText traverses message parts to find text/plain content and returns decoded string.
