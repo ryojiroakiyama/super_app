@@ -72,9 +72,6 @@ curl "http://localhost:8080/messages/latest?q=from:mailmag@mag2premium.com%20sub
 
 👉 動作確認手順
 ```bash
-# 1. API キーを用意
-echo "sk-xxxx" > openai_api_key.txt   # もしくは環境変数に設定
-
 # 2. サーバー起動
 GOTOOLCHAIN=local go run .
 
@@ -100,12 +97,15 @@ open out.mp3   # macOS の場合
 
 👉 動作確認手順
 ```bash
+# サーバー起動
+GOTOOLCHAIN=local go run .
+
 # 最新メール ID を取得（例）
 MSG_ID=$(curl -s \
   "http://localhost:8080/messages/latest?q=from:mailmag@mag2premium.com%20subject:%22週刊Life%20is%20beautiful%22" | jq -r '.messages[0].id')
 
-# 本文 → 音声変換しレスポンスを保存
-curl -X POST http://localhost:8080/messages/$MSG_ID/tts -o response.json
+# 本文 → 音声変換しレスポンスを保存, 500に限定
+curl -X POST "http://localhost:8080/messages/$MSG_ID/tts?limit=500" -o response.json
 
 # MP3 を生成して再生
 jq -r '.audioBase64' response.json | base64 -d > out.mp3
@@ -115,10 +115,7 @@ open out.mp3   # macOS
 `audios/` ディレクトリに `<id>.mp3` が保存され、音声が再生できれば OK です。
 
 ⚠️ **現状の制限**
-メールが HTML のみで大きい場合、`snippet` や簡易タグ除去テキストを TTS に送っているため「本文の一部しか読み上げられない」ケースがあります。次回は以下を改善します。
-
-* MIME パートを正しくデコードし、長文でも全文を結合して TTS へ渡す
-* OpenAI TTS の文字数制限を考慮し、チャンク分割＋連結を行う
+冒頭500ならできるが、超えるとできなくなる。
 
 ---
 
