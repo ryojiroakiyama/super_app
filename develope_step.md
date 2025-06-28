@@ -133,11 +133,11 @@ open out.mp3   # macOS
 
 ```bash
 # 1. サーバー起動
-GOTOOLCHAIN=local go run .
+make server
 
-# 2. メール ID を取得（例は最新 1 通）
+# 2. メールID取得
 MSG_ID=$(curl -s \
-  "http://localhost:8080/messages/latest" | jq -r '.messages[0].id')
+  "http://localhost:8080/messages/latest?q=from:mailmag@mag2premium.com%20subject:%22週刊Life%20is%20beautiful%22" | jq -r '.messages[0].id')
 
 # 3. ブラウザで再生
 open "http://localhost:8080/messages/${MSG_ID}/tts/stream"   # macOS
