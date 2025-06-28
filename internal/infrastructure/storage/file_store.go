@@ -15,7 +15,7 @@ type FileStore struct {
 
 func NewFileStore(dir string) *FileStore {
 	if dir == "" {
-		dir = "audios"
+		dir = "audio"
 	}
 	return &FileStore{Dir: dir}
 }

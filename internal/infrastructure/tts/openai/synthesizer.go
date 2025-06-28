@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -109,8 +110,12 @@ func getOpenAIKey() string {
 	if k := os.Getenv("OPENAI_API_KEY"); k != "" {
 		return k
 	}
-	data, err := os.ReadFile("openai_api_key.txt")
-	if err == nil {
+	secretsDir := os.Getenv("SECRETS_DIR")
+	if secretsDir == "" {
+		secretsDir = "secrets"
+	}
+	path := filepath.Join(secretsDir, "openai_api_key.txt")
+	if data, err := os.ReadFile(path); err == nil {
 		return strings.TrimSpace(string(data))
 	}
 	return ""

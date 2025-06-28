@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"context"
@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"strconv"
 
+	"gmail-tts-app/internal/infrastructure/googleauth"
+
 	"github.com/gofiber/fiber/v2"
+	gmailv1 "google.golang.org/api/gmail/v1"
 )
 
 // messageSummary is light representation returned to client.
@@ -16,8 +19,8 @@ type messageSummary struct {
 	Snippet string `json:"snippet"`
 }
 
-// registerGmailRoutes sets up /messages endpoint.
-func registerGmailRoutes(app *fiber.App) {
+// RegisterGmailListRoutes sets up /messages endpoints for listing.
+func RegisterGmailListRoutes(app *fiber.App) {
 	app.Get("/messages", listMessagesHandler)
 	app.Get("/messages/latest", latestMessageHandler)
 }
@@ -35,26 +38,42 @@ func listMessagesHandler(c *fiber.Ctx) error {
 	q := c.Query("q")
 
 	// Load OAuth2 token
-	tok, err := tokenFromFile()
+	tok, err := googleauth.TokenFromFile()
 	if err != nil {
 		return fiber.NewError(http.StatusUnauthorized, "missing token, authorize first via /auth/google")
 	}
 
 	// Build auth config (reuse credentials)
-	ga, err := newGoogleAuth()
+	ga, err := googleauth.NewGoogleAuth()
 	if err != nil {
 		log.Printf("failed to build google auth: %v", err)
 		return fiber.ErrInternalServerError
 	}
 
 	// Create gmail service
-	srv, err := gmailServiceFromToken(context.Background(), tok, ga.config)
+	srv, err := googleauth.GmailServiceFromToken(context.Background(), tok, ga.Config())
 	if err != nil {
 		log.Printf("unable to retrieve Gmail client: %v", err)
 		return fiber.ErrInternalServerError
 	}
 
 	// Call Gmail messages list
+	summaries, err := fetchMessageSummaries(srv, max, q)
+	if err != nil {
+		log.Printf("failed fetch messages: %v", err)
+		return fiber.ErrInternalServerError
+	}
+
+	return c.JSON(fiber.Map{"messages": summaries})
+}
+
+func latestMessageHandler(c *fiber.Ctx) error {
+	// Reuse list handler logic with max=1
+	c.Request().URI().QueryArgs().Set("max", "1")
+	return listMessagesHandler(c)
+}
+
+func fetchMessageSummaries(srv *gmailv1.Service, max int64, q string) ([]messageSummary, error) {
 	user := "me"
 	listCall := srv.Users.Messages.List(user).MaxResults(max).LabelIds("INBOX")
 	if q != "" {
@@ -63,12 +82,10 @@ func listMessagesHandler(c *fiber.Ctx) error {
 
 	r, err := listCall.Do()
 	if err != nil {
-		log.Printf("unable to retrieve messages: %v", err)
-		return fiber.ErrInternalServerError
+		return nil, err
 	}
 
 	var summaries []messageSummary
-
 	for _, m := range r.Messages {
 		msg, err := srv.Users.Messages.Get(user, m.Id).Format("metadata").MetadataHeaders("Subject").Do()
 		if err != nil {
@@ -88,12 +105,5 @@ func listMessagesHandler(c *fiber.Ctx) error {
 			Snippet: msg.Snippet,
 		})
 	}
-
-	return c.JSON(fiber.Map{"messages": summaries})
-}
-
-func latestMessageHandler(c *fiber.Ctx) error {
-	// Reuse list handler logic with max=1
-	c.Request().URI().QueryArgs().Set("max", "1")
-	return listMessagesHandler(c)
+	return summaries, nil
 }

@@ -1,4 +1,4 @@
-package main
+package googleauth
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -15,8 +16,8 @@ import (
 )
 
 const (
-	credentialsFile = "credentials.json" // Downloaded from Google Cloud Console
-	tokenFile       = "token.json"       // Saved OAuth2 token
+	credentialsFile = "credentials.json" // default file path, can be overridden by env GOOGLE_CREDENTIALS
+	tokenFile       = "token.json"       // default token path, can be overridden by env GMAIL_TOKEN
 )
 
 // GoogleAuth wraps oauth2 configuration and helpers.
@@ -24,9 +25,17 @@ type GoogleAuth struct {
 	config *oauth2.Config
 }
 
-// newGoogleAuth creates GoogleAuth by reading credentials.json.
-func newGoogleAuth() (*GoogleAuth, error) {
-	b, err := os.ReadFile(credentialsFile)
+// NewGoogleAuth creates GoogleAuth by reading credentials.json (or env-specified path).
+func NewGoogleAuth() (*GoogleAuth, error) {
+	credPath := os.Getenv("GOOGLE_CREDENTIALS")
+	if credPath == "" {
+		secretsDir := os.Getenv("SECRETS_DIR")
+		if secretsDir == "" {
+			secretsDir = "secrets"
+		}
+		credPath = filepath.Join(secretsDir, credentialsFile)
+	}
+	b, err := os.ReadFile(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %w", err)
 	}
@@ -34,7 +43,7 @@ func newGoogleAuth() (*GoogleAuth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %w", err)
 	}
-	// Adjust redirect URL if running on non-local environment
+	// Adjust redirect URL if running locally
 	if config.RedirectURL == "" {
 		config.RedirectURL = "http://localhost:8080/auth/google/callback"
 	}
@@ -52,15 +61,23 @@ func (ga *GoogleAuth) Exchange(ctx context.Context, code string) (*oauth2.Token,
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve token from web: %w", err)
 	}
-	if err := saveToken(tok); err != nil {
+	if err := SaveToken(tok); err != nil {
 		return nil, err
 	}
 	return tok, nil
 }
 
-// saveToken writes token to file path tokenFile.
-func saveToken(token *oauth2.Token) error {
-	f, err := os.Create(tokenFile)
+// SaveToken writes token to file path tokenFile.
+func SaveToken(token *oauth2.Token) error {
+	tokenPath := os.Getenv("GMAIL_TOKEN")
+	if tokenPath == "" {
+		secretsDir := os.Getenv("SECRETS_DIR")
+		if secretsDir == "" {
+			secretsDir = "secrets"
+		}
+		tokenPath = filepath.Join(secretsDir, tokenFile)
+	}
+	f, err := os.Create(tokenPath)
 	if err != nil {
 		return fmt.Errorf("unable to cache oauth token: %w", err)
 	}
@@ -68,9 +85,17 @@ func saveToken(token *oauth2.Token) error {
 	return json.NewEncoder(f).Encode(token)
 }
 
-// tokenFromFile retrieves token from local file.
-func tokenFromFile() (*oauth2.Token, error) {
-	f, err := os.Open(tokenFile)
+// TokenFromFile retrieves token from local file.
+func TokenFromFile() (*oauth2.Token, error) {
+	tokenPath := os.Getenv("GMAIL_TOKEN")
+	if tokenPath == "" {
+		secretsDir := os.Getenv("SECRETS_DIR")
+		if secretsDir == "" {
+			secretsDir = "secrets"
+		}
+		tokenPath = filepath.Join(secretsDir, tokenFile)
+	}
+	f, err := os.Open(tokenPath)
 	if err != nil {
 		return nil, err
 	}
@@ -80,11 +105,26 @@ func tokenFromFile() (*oauth2.Token, error) {
 	return &tok, err
 }
 
-// Middleware to inject gmail Service (future use)
-func gmailServiceFromToken(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*gmail.Service, error) {
+// GmailServiceFromToken returns Gmail service from token and config.
+func GmailServiceFromToken(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*gmail.Service, error) {
 	client := config.Client(ctx, token)
 	return gmail.New(client)
 }
+
+// BuildGmailService is a helper that loads token and credentials then builds Gmail API service.
+func BuildGmailService(ctx context.Context) (*gmail.Service, error) {
+	tok, err := TokenFromFile()
+	if err != nil {
+		return nil, err
+	}
+	ga, err := NewGoogleAuth()
+	if err != nil {
+		return nil, err
+	}
+	return GmailServiceFromToken(ctx, tok, ga.config)
+}
+
+// ===== HTTP Route helpers =====
 
 // Simple in-memory state store.
 var oauthState = make(map[string]time.Time)
@@ -108,7 +148,7 @@ func validateState(state string) bool {
 
 // RegisterOAuthRoutes adds /auth/google and /auth/google/callback
 func RegisterOAuthRoutes(app *fiber.App) error {
-	ga, err := newGoogleAuth()
+	ga, err := NewGoogleAuth()
 	if err != nil {
 		return err
 	}
@@ -134,4 +174,8 @@ func RegisterOAuthRoutes(app *fiber.App) error {
 	})
 
 	return nil
+}
+
+func (ga *GoogleAuth) Config() *oauth2.Config {
+	return ga.config
 }
