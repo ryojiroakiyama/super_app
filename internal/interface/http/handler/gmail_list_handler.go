@@ -14,9 +14,12 @@ import (
 
 // messageSummary is light representation returned to client.
 type messageSummary struct {
-	ID      string `json:"id"`
-	Subject string `json:"subject"`
-	Snippet string `json:"snippet"`
+	ID           string `json:"id"`
+	Subject      string `json:"subject"`
+	Snippet      string `json:"snippet"`
+	InternalDate int64  `json:"internalDate"`
+	From         string `json:"from"`
+	Preview      string `json:"preview"`
 }
 
 // RegisterGmailListRoutes sets up /messages endpoints for listing.
@@ -36,6 +39,8 @@ func listMessagesHandler(c *fiber.Ctx) error {
 
 	// Optional Gmail search query
 	q := c.Query("q")
+
+	log.Printf("[handler] list messages: max=%d q=%s", max, q)
 
 	// Load OAuth2 token
 	tok, err := googleauth.TokenFromFile()
@@ -87,22 +92,32 @@ func fetchMessageSummaries(srv *gmailv1.Service, max int64, q string) ([]message
 
 	var summaries []messageSummary
 	for _, m := range r.Messages {
-		msg, err := srv.Users.Messages.Get(user, m.Id).Format("metadata").MetadataHeaders("Subject").Do()
+		msg, err := srv.Users.Messages.Get(user, m.Id).Format("metadata").MetadataHeaders("Subject", "From").Do()
 		if err != nil {
 			log.Printf("failed to get message %s: %v", m.Id, err)
 			continue
 		}
 		subj := "(no subject)"
+		from := ""
 		for _, h := range msg.Payload.Headers {
-			if h.Name == "Subject" {
+			switch h.Name {
+			case "Subject":
 				subj = h.Value
-				break
+			case "From":
+				from = h.Value
 			}
 		}
+		preview := msg.Snippet
+		if runeCount := len([]rune(preview)); runeCount > 20 {
+			preview = string([]rune(preview)[:20])
+		}
 		summaries = append(summaries, messageSummary{
-			ID:      m.Id,
-			Subject: subj,
-			Snippet: msg.Snippet,
+			ID:           m.Id,
+			Subject:      subj,
+			Snippet:      preview,
+			InternalDate: msg.InternalDate,
+			From:         from,
+			Preview:      preview,
 		})
 	}
 	return summaries, nil

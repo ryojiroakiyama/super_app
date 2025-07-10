@@ -108,6 +108,15 @@ func TokenFromFile() (*oauth2.Token, error) {
 // GmailServiceFromToken returns Gmail service from token and config.
 func GmailServiceFromToken(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*gmail.Service, error) {
 	client := config.Client(ctx, token)
+
+	// Wrap transport with logging for debugging outgoing Gmail API calls.
+	// This will print method, URL, status and latency to the server log.
+	if client.Transport != nil {
+		client.Transport = &loggingTransport{base: client.Transport}
+	} else {
+		client.Transport = &loggingTransport{}
+	}
+
 	return gmail.New(client)
 }
 

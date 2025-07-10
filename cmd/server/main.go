@@ -13,12 +13,24 @@ import (
 	ucmsg "gmail-tts-app/internal/usecase/message"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
 func main() {
 	cfg := config.Load()
 
 	app := fiber.New()
+	// CORS middleware for browser access
+	app.Use(cors.New())
+
+	// Serve static frontend files
+	app.Static("/", "./public")
+
+	// Explicit root index fallback (for safety)
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendFile("./public/index.html")
+	})
+
 	app.Get("/healthz", func(c *fiber.Ctx) error { return c.SendString("ok") })
 
 	// OAuth routes

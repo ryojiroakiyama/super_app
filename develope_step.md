@@ -133,7 +133,7 @@ open out.mp3   # macOS
 
 ```bash
 # 1. サーバー起動
-make server
+make run
 
 # 2. メールID取得
 MSG_ID=$(curl -s \

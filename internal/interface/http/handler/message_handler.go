@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"io"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -37,6 +38,7 @@ func (h *MessageHandler) generateAudio(c *fiber.Ctx) error {
 	if id == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "id required")
 	}
+	log.Printf("[handler] generateAudio id=%s", id)
 	limitChars := 0
 	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -58,6 +60,7 @@ func (h *MessageHandler) streamAudio(c *fiber.Ctx) error {
 	if id == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "id required")
 	}
+	log.Printf("[handler] streamAudio id=%s", id)
 	limitChars := 0
 	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"strings"
 
 	"gmail-tts-app/internal/domain/message"
@@ -22,6 +23,7 @@ func NewMessageRepository(srv *gmail.Service) *MessageRepository {
 
 // GetByID fetches Gmail message, aggregates plain text / html to EmailMessage Body.
 func (r *MessageRepository) GetByID(ctx context.Context, id message.ID) (*message.EmailMessage, error) {
+	log.Printf("[repo] GetByID: %s", id)
 	gm, err := r.srv.Users.Messages.Get("me", string(id)).Format("full").Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("gmail get message: %w", err)

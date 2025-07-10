@@ -3,5 +3,5 @@
 dev:
 	air 
 
-server:
+run:
 	go run ./cmd/server
