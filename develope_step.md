@@ -152,6 +152,15 @@ open out.mp3
 
 ---
 
+## Step 6-2
+ブラウザでメール一覧&選択&ストリーム再生
+```
+make run
+
+ブラウザでアクセス
+http://localhost:8080/
+```
+
 ## Step 7 : SQLite + GORM で履歴管理
 
 1. `models.go` に `User`, `Message`, `AudioHistory` を定義
