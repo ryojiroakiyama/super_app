@@ -29,7 +29,7 @@ function buildQuery(from, title) {
 function fetchList() {
   console.log('[fetchList] called');
   const q = buildQuery(filterFrom.value.trim(), filterTitle.value.trim());
-  const url = q ? `${API}/messages?max=20&q=${q}` : `${API}/messages?max=20`;
+  const url = q ? `${API}/messages?max=5&q=${q}` : `${API}/messages?max=5`;
   console.log('[fetchList] url', url);
   fetch(url)
     .then(r => r.json())
@@ -70,17 +70,18 @@ function fetchList() {
           try {
             dlBtn.disabled = true;
             dlBtn.textContent = 'ダウンロード中…';
-            const resp = await fetch(`${API}/messages/${m.id}/tts/stream`);
-            if (!resp.ok) throw new Error('failed to fetch audio');
-            const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
+            console.log('[download] generating audio for', m.id);
+            const genResp = await fetch(`${API}/messages/${m.id}/tts`, {method: 'POST'});
+            if (!genResp.ok) throw new Error('failed to generate audio');
+            console.log('[download] generated, downloading file');
+            const url = `${API}/audios/${m.id}.mp3`;
             const a = document.createElement('a');
             a.href = url;
             a.download = `${m.id}.mp3`;
             document.body.appendChild(a);
             a.click();
             a.remove();
-            URL.revokeObjectURL(url);
+            console.log('[download] download triggered', url);
           } catch (e) {
             console.error(e);
             alert('ダウンロードに失敗しました');

@@ -3,6 +3,10 @@ package message
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
+	"log"
+	"strings"
+	"time"
 
 	"gmail-tts-app/internal/domain/audio"
 	domainmsg "gmail-tts-app/internal/domain/message"
@@ -47,25 +51,44 @@ func (uc *GenerateAudioFromMessage) Execute(ctx context.Context, in *GenerateAud
 		text = truncateRunes(text, in.LimitChars)
 	}
 
-	// 2. Synthesize
-	audioObj, err := uc.synthesizer.Synthesize(ctx, text)
+	// Split into chunks (<=1500 runes)
+	const chunkSize = 1500
+	chunks := splitByRuneCount(text, chunkSize)
+
+	var merged []byte
+	for i, part := range chunks {
+		log.Printf("[uc] synthesize part %d/%d runes=%d", i+1, len(chunks), len([]rune(part)))
+		partCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		audioObj, err := uc.synthesizer.Synthesize(partCtx, part)
+		cancel()
+		if err != nil {
+			log.Printf("[uc] synthesize error on part %d: %v", i+1, err)
+			return nil, err
+		}
+		// Save individual chunk for debugging
+		partFile := fmt.Sprintf("%s_part%d", msg.ID, i+1)
+		if _, err := uc.store.Save(audioObj.Data, partFile); err != nil {
+			log.Printf("[uc] save part error: %v", err)
+			return nil, err
+		}
+		merged = append(merged, audioObj.Data...)
+	}
+
+	log.Printf("[uc] all parts synthesized, total bytes=%d", len(merged))
+
+	// Save merged audio
+	mergedPath, err := uc.store.Save(merged, string(msg.ID))
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. Store
-	path, err := uc.store.Save(audioObj.Data, string(msg.ID))
-	if err != nil {
-		return nil, err
-	}
-
-	b64 := base64.StdEncoding.EncodeToString(audioObj.Data)
+	b64 := base64.StdEncoding.EncodeToString(merged)
 
 	return &GenerateAudioFromMessageOutput{
 		ID:          string(msg.ID),
-		LocalPath:   string(path),
+		LocalPath:   string(mergedPath),
 		AudioBase64: b64,
-		Audio:       audioObj,
+		Audio:       &tts.Audio{Data: merged, Format: "mp3"},
 	}, nil
 }
 
@@ -80,4 +103,27 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// splitByRuneCount splits string s into chunks each having at most n runes.
+func splitByRuneCount(s string, n int) []string {
+	if n <= 0 || runeCount(s) <= n {
+		return []string{s}
+	}
+	var res []string
+	var builder strings.Builder
+	count := 0
+	for _, r := range s {
+		builder.WriteRune(r)
+		count++
+		if count >= n {
+			res = append(res, builder.String())
+			builder.Reset()
+			count = 0
+		}
+	}
+	if builder.Len() > 0 {
+		res = append(res, builder.String())
+	}
+	return res
 }

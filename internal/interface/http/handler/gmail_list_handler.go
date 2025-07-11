@@ -29,8 +29,8 @@ func RegisterGmailListRoutes(app *fiber.App) {
 }
 
 func listMessagesHandler(c *fiber.Ctx) error {
-	// Parse max query param (default 10)
-	max := int64(10)
+	// Parse max query param (default 5)
+	max := int64(5)
 	if m := c.Query("max"); m != "" {
 		if v, err := strconv.ParseInt(m, 10, 64); err == nil && v > 0 {
 			max = v

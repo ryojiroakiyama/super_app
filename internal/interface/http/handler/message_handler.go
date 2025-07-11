@@ -52,6 +52,7 @@ func (h *MessageHandler) generateAudio(c *fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
+	log.Printf("[handler] generateAudio done path=%s size=%d", out.LocalPath, len(out.AudioBase64)/4*3)
 	return c.JSON(out)
 }
 
