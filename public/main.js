@@ -74,7 +74,7 @@ function fetchList() {
             const genResp = await fetch(`${API}/messages/${m.id}/tts`, {method: 'POST'});
             if (!genResp.ok) throw new Error('failed to generate audio');
             console.log('[download] generated, downloading file');
-            const url = `${API}/audios/${m.id}.mp3`;
+            const url = `${API}/audios/merged/${m.id}.mp3`;
             const a = document.createElement('a');
             a.href = url;
             a.download = `${m.id}.mp3`;

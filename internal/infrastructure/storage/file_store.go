@@ -23,10 +23,11 @@ func NewFileStore(dir string) *FileStore {
 
 // Save writes data to {dir}/{fileName}.mp3 and returns the path.
 func (fs *FileStore) Save(data []byte, fileName string) (audio.Path, error) {
-	if err := os.MkdirAll(fs.Dir, 0o755); err != nil {
+	// determine full path (allowing nested sub dirs)
+	path := filepath.Join(fs.Dir, fmt.Sprintf("%s.mp3", fileName))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(fs.Dir, fmt.Sprintf("%s.mp3", fileName))
 	log.Printf("[FileStore] saving %d bytes to %s", len(data), path)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return "", err

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -66,7 +67,7 @@ func (uc *GenerateAudioFromMessage) Execute(ctx context.Context, in *GenerateAud
 			return nil, err
 		}
 		// Save individual chunk for debugging
-		partFile := fmt.Sprintf("%s_part%d", msg.ID, i+1)
+		partFile := fmt.Sprintf("parts/%s_part%d", msg.ID, i+1)
 		if _, err := uc.store.Save(audioObj.Data, partFile); err != nil {
 			log.Printf("[uc] save part error: %v", err)
 			return nil, err
@@ -77,7 +78,7 @@ func (uc *GenerateAudioFromMessage) Execute(ctx context.Context, in *GenerateAud
 	log.Printf("[uc] all parts synthesized, total bytes=%d", len(merged))
 
 	// Save merged audio
-	mergedPath, err := uc.store.Save(merged, string(msg.ID))
+	mergedPath, err := uc.store.Save(merged, filepath.Join("merged", string(msg.ID)))
 	if err != nil {
 		return nil, err
 	}
