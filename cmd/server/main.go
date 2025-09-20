@@ -1,214 +1,158 @@
 package main
 
 import (
-    "context"
-    "log"
-    "os"
-    "path/filepath"
-    "strings"
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
-    "gmail-tts-app/internal/config"
-    gmailrepo "gmail-tts-app/internal/infrastructure/gmail"
-    "gmail-tts-app/internal/infrastructure/googleauth"
-    "gmail-tts-app/internal/infrastructure/storage"
-    "gmail-tts-app/internal/infrastructure/tts/openai"
-    "gmail-tts-app/internal/interface/http/handler"
-    ucmsg "gmail-tts-app/internal/usecase/message"
+	"gmail-tts-app/internal/config"
+	"gmail-tts-app/internal/infrastructure/gmail"
+	"gmail-tts-app/internal/infrastructure/googleauth"
+	"gmail-tts-app/internal/infrastructure/storage"
+	openaitts "gmail-tts-app/internal/infrastructure/tts/openai"
+	usemsg "gmail-tts-app/internal/usecase/message"
 
-    "github.com/gofiber/fiber/v2"
-    "github.com/gofiber/fiber/v2/middleware/cors"
+	gmailapi "google.golang.org/api/gmail/v1"
 )
 
 func main() {
 	cfg := config.Load()
+	ctx := context.Background()
 
-	app := fiber.New()
-	// CORS middleware for browser access
-	app.Use(cors.New())
+	log.Printf("[flow] starting run flow")
 
-	// Serve static frontend files
-	app.Static("/", "./public")
-
-	// Explicit root index fallback (for safety)
-	app.Get("/", func(c *fiber.Ctx) error {
-		return c.SendFile("./public/index.html")
-	})
-
-	app.Get("/healthz", func(c *fiber.Ctx) error { return c.SendString("ok") })
-
-    // Placeholders to allow hot re-init after authorization
-    var (
-        repo  *gmailrepo.MessageRepository
-        uc    *ucmsg.GenerateAudioFromMessage
-        mh    *handler.MessageHandler
-        synth *openai.Synthesizer
-        store *storage.FileStore
-    )
-
-    // Helpers for persisting processed IDs across restarts
-    downloadedFile := filepath.Join("log", "downloaded_ids.txt")
-    loadDownloadedIDs := func(path string) map[string]struct{} {
-        ids := make(map[string]struct{})
-        b, err := os.ReadFile(path)
-        if err != nil {
-            if os.IsNotExist(err) {
-                return ids
-            }
-            log.Printf("[autojob] read ids error: %v", err)
-            return ids
-        }
-        for _, line := range strings.Split(string(b), "\n") {
-            id := strings.TrimSpace(line)
-            if id != "" {
-                ids[id] = struct{}{}
-            }
-        }
-        return ids
-    }
-    appendDownloadedID := func(path, id string) {
-        if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-            log.Printf("[autojob] mkdir error: %v", err)
-            return
-        }
-        f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-        if err != nil {
-            log.Printf("[autojob] open ids file error: %v", err)
-            return
-        }
-        defer f.Close()
-        if _, err := f.WriteString(id + "\n"); err != nil {
-            log.Printf("[autojob] append id error: %v", err)
-        }
-    }
-
-    // One-shot job: download latest "週刊Life is beautiful" mail and TTS save
-    startAutoDownload := func() {
-        go func() {
-            ctx := context.Background()
-            srv, err := googleauth.BuildGmailService(ctx)
-            if err != nil {
-                log.Printf("[autojob] waiting for authorization: %v", err)
-                return
-            }
-            q := "subject:\"週刊Life is beautiful\""
-            list, err := srv.Users.Messages.List("me").Q(q).MaxResults(1).Do()
-            if err != nil {
-                log.Printf("[autojob] list error: %v", err)
-                return
-            }
-            if list == nil || len(list.Messages) == 0 {
-                log.Printf("[autojob] no messages found for query: %s", q)
-                return
-            }
-            mID := list.Messages[0].Id
-            processed := loadDownloadedIDs(downloadedFile)
-            if _, ok := processed[mID]; ok {
-                log.Printf("[autojob] latest already processed (persisted): %s", mID)
-                return
-            }
-
-            if synth == nil {
-                s, err := openai.NewSynthesizer(cfg.OpenAIAPIKey)
-                if err != nil {
-                    log.Printf("[autojob] synth init error: %v", err)
-                    return
-                }
-                synth = s
-            }
-            if store == nil {
-                store = storage.NewFileStore(cfg.AudioDir)
-            }
-            jobRepo := gmailrepo.NewMessageRepository(srv)
-            jobUC := ucmsg.NewGenerateAudioFromMessage(jobRepo, synth, store)
-            out, err := jobUC.Execute(ctx, &ucmsg.GenerateAudioFromMessageInput{MessageID: mID})
-            if err != nil {
-                log.Printf("[autojob] tts error: %v", err)
-                return
-            }
-            appendDownloadedID(downloadedFile, out.ID)
-            log.Printf("[autojob] saved: %s (id=%s)", out.LocalPath, out.ID)
-        }()
-    }
-
-    // OAuth routes with onAuthorized hook: reload token and rebuild deps
-    if err := googleauth.RegisterOAuthRoutes(app, func() {
-        ctx := context.Background()
-        if srv, err := googleauth.BuildGmailService(ctx); err != nil {
-            log.Printf("[auth] rebuild gmail service failed: %v", err)
-            return
-        } else {
-            repo = gmailrepo.NewMessageRepository(srv)
-            if store == nil {
-                store = storage.NewFileStore(cfg.AudioDir)
-            }
-            uc = ucmsg.NewGenerateAudioFromMessage(repo, synth, store)
-            if mh != nil {
-                mh.ReplaceDeps(uc, repo, synth)
-                log.Printf("[auth] dependencies re-initialized after authorization")
-            } else {
-                log.Printf("[auth] message handler not ready; will use new deps on first init")
-            }
-            // kick off auto-download job after authorization
-            startAutoDownload()
-        }
-    }); err != nil {
-		log.Fatalf("failed to register OAuth routes: %v", err)
+	// 1-2) Gmailアクセス可否を確認し、必要なら認証を促す
+	srv, err := ensureGmailService(ctx)
+	if err != nil {
+		log.Printf("[auth] failed to obtain gmail service: %v", err)
+		return
 	}
 
-    // Build dependencies
-    ctx := context.Background()
-    // try initial gmail init
-
-    // Try to build Gmail service, but don't exit if not authorized yet
-    if srv, err := googleauth.BuildGmailService(ctx); err != nil {
-        log.Printf("[startup] Gmail not authorized or token missing: %v", err)
-        log.Printf("[startup] Please authorize via http://localhost:%s/auth/google", cfg.Port)
-    } else {
-        // Lightweight access check
-        if _, err := srv.Users.Labels.List("me").Do(); err != nil {
-            log.Printf("[startup] Gmail service reachable but access failed: %v", err)
-            log.Printf("[startup] Please re-authorize via http://localhost:%s/auth/google", cfg.Port)
-        } else {
-            repo = gmailrepo.NewMessageRepository(srv)
-            log.Printf("[startup] Gmail authorization OK")
-        }
-    }
-
-    s, err := openai.NewSynthesizer(cfg.OpenAIAPIKey)
-    if err != nil {
-        log.Fatalf("openai synth build error: %v", err)
-    }
-    synth = s
-    store = storage.NewFileStore(cfg.AudioDir)
-
-    if repo != nil {
-        uc = ucmsg.NewGenerateAudioFromMessage(repo, synth, store)
-    }
-
-    mh = handler.NewMessageHandler(uc, repo, synth)
-    mh.Register(app)
-
-    // Start auto-download right away if already authorized at startup
-    if repo != nil {
-        startAutoDownload()
-    }
-
-    // Auth status endpoint for clients/health checks
-    app.Get("/auth/status", func(c *fiber.Ctx) error {
-        // Quick check: try building service and listing 1 label
-        if srv, err := googleauth.BuildGmailService(c.Context()); err != nil {
-            return c.JSON(fiber.Map{"authorized": false, "reason": err.Error()})
-        } else if _, err := srv.Users.Labels.List("me").Do(); err != nil {
-            return c.JSON(fiber.Map{"authorized": false, "reason": err.Error()})
-        }
-        return c.JSON(fiber.Map{"authorized": true})
-    })
-
-	// Gmail list routes (legacy)
-	handler.RegisterGmailListRoutes(app)
-
-	log.Printf("🚀  Server listening on http://localhost:%s", cfg.Port)
-	if err := app.Listen(":" + cfg.Port); err != nil {
-		log.Fatalf("failed to start server: %v", err)
+	// 3) 既定条件で最新メールIDを取得（INBOXの最新1件、検索クエリ適用）
+	q := getGmailQuery()
+	if strings.TrimSpace(q) != "" {
+		log.Printf("[gmail] applying query: %s", q)
 	}
+	msgID, err := latestMessageID(ctx, srv, q)
+	if err != nil {
+		log.Printf("[gmail] failed to get latest message id: %v", err)
+		return
+	}
+	log.Printf("[gmail] latest message id: %s", msgID)
+
+	// 4) downloaded_ids.txt に存在するか確認
+	if alreadyDownloaded(msgID) {
+		log.Printf("[flow] message %s already processed. exiting.", msgID)
+		return
+	}
+
+	// 5) ダウンロード開始（本文取得→TTS→保存）
+	repo := gmail.NewMessageRepository(srv)
+	synth, err := openaitts.NewSynthesizer(cfg.OpenAIAPIKey)
+	if err != nil {
+		log.Printf("[tts] synthesizer init error: %v", err)
+		return
+	}
+	store := storage.NewFileStore(cfg.AudioDir)
+	uc := usemsg.NewGenerateAudioFromMessage(repo, synth, store)
+
+	log.Printf("[flow] start synthesis for %s", msgID)
+	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	out, err := uc.Execute(ctxTimeout, &usemsg.GenerateAudioFromMessageInput{MessageID: msgID, LimitChars: 0})
+	if err != nil {
+		log.Printf("[flow] synthesis error: %v", err)
+		return
+	}
+	log.Printf("[flow] saved audio to %s (bytes=%d)", out.LocalPath, len(out.Audio.Data))
+
+	// 6) downloaded_ids.txt に追記
+	if err := appendDownloadedID(msgID); err != nil {
+		log.Printf("[flow] failed to append downloaded id: %v", err)
+		return
+	}
+	log.Printf("[flow] completed for %s", msgID)
+}
+
+func ensureGmailService(ctx context.Context) (*gmailapi.Service, error) {
+	// 試行: 既存トークンでアクセス可能か
+	srv, err := googleauth.BuildGmailService(ctx)
+	if err == nil {
+		// 軽い疎通確認（レートに優しい範囲）
+		if _, e := srv.Users.Labels.List("me").Context(ctx).Do(); e == nil {
+			return srv, nil
+		}
+		// トークン不正と思われる場合は再認証
+	}
+
+	log.Printf("[auth] authorization required. starting interactive flow...")
+	if e := googleauth.ObtainTokenInteractive(ctx); e != nil {
+		return nil, e
+	}
+	return googleauth.BuildGmailService(ctx)
+}
+
+func latestMessageID(ctx context.Context, srv *gmailapi.Service, query string) (string, error) {
+	call := srv.Users.Messages.List("me").LabelIds("INBOX").MaxResults(1).Context(ctx)
+	if strings.TrimSpace(query) != "" {
+		call = call.Q(query)
+	}
+	res, err := call.Do()
+	if err != nil {
+		return "", err
+	}
+	if res == nil || len(res.Messages) == 0 {
+		return "", errors.New("no messages found in INBOX")
+	}
+	return res.Messages[0].Id, nil
+}
+
+func downloadedLogPath() string {
+	return filepath.Join("log", "downloaded_ids.txt")
+}
+
+func alreadyDownloaded(id string) bool {
+	path := downloadedLogPath()
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if line == id {
+			return true
+		}
+	}
+	return false
+}
+
+func appendDownloadedID(id string) error {
+	path := downloadedLogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintf(f, "%s\n", id)
+	return err
+}
+
+func getGmailQuery() string {
+    if v := os.Getenv("GMAIL_QUERY"); strings.TrimSpace(v) != "" {
+        return v
+    }
+    // 既定の検索条件: 件名に「週刊Life is beautiful」
+    return "subject:\"週刊Life is beautiful\""
 }

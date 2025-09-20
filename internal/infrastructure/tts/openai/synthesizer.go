@@ -1,18 +1,18 @@
 package openai
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "os"
+    "path/filepath"
+    "strings"
+    "time"
 
-	"gmail-tts-app/internal/domain/tts"
+    "gmail-tts-app/internal/domain/tts"
 )
 
 // Synthesizer implements tts.Synthesizer using OpenAI TTS endpoint.
@@ -74,35 +74,7 @@ func (s *Synthesizer) Synthesize(ctx context.Context, text string) (*tts.Audio, 
 	}
 	return &tts.Audio{Data: audioBytes, Format: "mp3"}, nil
 }
-
-// SynthesizeStream converts text to a stream of audio bytes (mp3).
-func (s *Synthesizer) SynthesizeStream(ctx context.Context, text string) (io.ReadCloser, error) {
-	reqBody := map[string]any{
-		"model":  s.model,
-		"voice":  s.voice,
-		"input":  text,
-		"format": "mp3",
-		"stream": true,
-	}
-	b, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/audio/speech", bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai stream status %d: %s", resp.StatusCode, string(raw))
-	}
-	return resp.Body, nil // caller closes
-}
+// Stream synth is unused in CLI mode and intentionally omitted.
 
 // getOpenAIKey returns the OpenAI API key.
 // Priority: env OPENAI_API_KEY > file openai_api_key.txt

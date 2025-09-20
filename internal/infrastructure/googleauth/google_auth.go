@@ -1,18 +1,20 @@
 package googleauth
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"time"
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "math/rand"
+    "net"
+    "net/http"
+    "os"
+    "path/filepath"
+    "time"
 
-	"github.com/gofiber/fiber/v2"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
-	"google.golang.org/api/gmail/v1"
+    "golang.org/x/oauth2"
+    "golang.org/x/oauth2/google"
+    "google.golang.org/api/gmail/v1"
 )
 
 const (
@@ -35,7 +37,7 @@ func NewGoogleAuth() (*GoogleAuth, error) {
 		}
 		credPath = filepath.Join(secretsDir, credentialsFile)
 	}
-	b, err := os.ReadFile(credPath)
+    b, err := os.ReadFile(credPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %w", err)
 	}
@@ -43,16 +45,102 @@ func NewGoogleAuth() (*GoogleAuth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %w", err)
 	}
-	// Adjust redirect URL if running locally
-	if config.RedirectURL == "" {
-		config.RedirectURL = "http://localhost:8080/auth/google/callback"
-	}
+    log.Printf("[auth] using credentials: %s", credPath)
+    log.Printf("[auth] client_id: %s", config.ClientID)
+    // Restore default server-style redirect URL if not specified in credentials
+    if config.RedirectURL == "" {
+        config.RedirectURL = "http://localhost:8080/auth/google/callback"
+    }
 	return &GoogleAuth{config: config}, nil
 }
 
 // AuthURL generates Google OAuth consent URL.
 func (ga *GoogleAuth) AuthURL(state string) string {
 	return ga.config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+}
+
+// SetRedirectURL overrides the redirect URL (useful for loopback CLI flow).
+func (ga *GoogleAuth) SetRedirectURL(redirect string) {
+    ga.config.RedirectURL = redirect
+}
+
+// ObtainTokenInteractive starts a temporary local HTTP server (loopback flow),
+// opens the browser URL (printed to stdout), captures the auth code and saves token.
+func ObtainTokenInteractive(ctx context.Context) error {
+    ga, err := NewGoogleAuth()
+    if err != nil {
+        return err
+    }
+
+    // Fixed loopback port (8080) for redirect handling
+    ln, err := net.Listen("tcp", "127.0.0.1:8080")
+    if err != nil {
+        return fmt.Errorf("listen 127.0.0.1:8080: %w", err)
+    }
+    defer ln.Close()
+    // Use host for redirect URL to match OAuth client configuration (default: localhost)
+    host := os.Getenv("GOOGLE_LOOPBACK_HOST")
+    if host == "" {
+        host = "localhost"
+    }
+    addr := host + ":8080"
+
+    // Keep path consistent with previous server callback (allow override)
+    callbackPath := "/auth/google/callback"
+    if p := os.Getenv("GOOGLE_CALLBACK_PATH"); p != "" {
+        callbackPath = p
+    }
+    redirectURL := fmt.Sprintf("http://%s%s", addr, callbackPath)
+    ga.SetRedirectURL(redirectURL)
+
+    // Generate state
+    rand.Seed(time.Now().UnixNano())
+    state := fmt.Sprintf("st-%d", rand.Int63())
+
+    // Build URL
+    url := ga.AuthURL(state)
+    log.Printf("[auth] Open this URL to authorize:\n%s", url)
+
+    // Minimal HTTP handler to receive code
+    codeCh := make(chan string, 1)
+    srv := &http.Server{}
+    mux := http.NewServeMux()
+    mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Query().Get("state") != state {
+            http.Error(w, "state mismatch", http.StatusBadRequest)
+            return
+        }
+        code := r.URL.Query().Get("code")
+        if code == "" {
+            http.Error(w, "code missing", http.StatusBadRequest)
+            return
+        }
+        fmt.Fprint(w, "Authorization received. You can close this tab.")
+        codeCh <- code
+    })
+    srv.Handler = mux
+
+    go func() {
+        _ = srv.Serve(ln)
+    }()
+
+    // Wait for code or timeout
+    var code string
+    select {
+    case code = <-codeCh:
+        // proceed
+    case <-time.After(5 * time.Minute):
+        _ = srv.Close()
+        return fmt.Errorf("authorization timeout")
+    }
+
+    // Exchange and save token
+    if _, err := ga.Exchange(ctx, code); err != nil {
+        _ = srv.Close()
+        return err
+    }
+    _ = srv.Close()
+    return nil
 }
 
 // Exchange exchanges code to token and persist it.
@@ -108,15 +196,6 @@ func TokenFromFile() (*oauth2.Token, error) {
 // GmailServiceFromToken returns Gmail service from token and config.
 func GmailServiceFromToken(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*gmail.Service, error) {
 	client := config.Client(ctx, token)
-
-	// Wrap transport with logging for debugging outgoing Gmail API calls.
-	// This will print method, URL, status and latency to the server log.
-	if client.Transport != nil {
-		client.Transport = &loggingTransport{base: client.Transport}
-	} else {
-		client.Transport = &loggingTransport{}
-	}
-
 	return gmail.New(client)
 }
 
@@ -133,62 +212,4 @@ func BuildGmailService(ctx context.Context) (*gmail.Service, error) {
 	return GmailServiceFromToken(ctx, tok, ga.config)
 }
 
-// ===== HTTP Route helpers =====
-
-// Simple in-memory state store.
-var oauthState = make(map[string]time.Time)
-
-func generateState() string {
-	// naive random string
-	return fmt.Sprintf("st-%d", time.Now().UnixNano())
-}
-
-func validateState(state string) bool {
-	if exp, ok := oauthState[state]; ok {
-		// expire after 5 mins
-		if time.Since(exp) < 5*time.Minute {
-			delete(oauthState, state)
-			return true
-		}
-		delete(oauthState, state)
-	}
-	return false
-}
-
-// RegisterOAuthRoutes adds /auth/google and /auth/google/callback
-func RegisterOAuthRoutes(app *fiber.App, onAuthorized func()) error {
-	ga, err := NewGoogleAuth()
-	if err != nil {
-		return err
-	}
-
-	app.Get("/auth/google", func(c *fiber.Ctx) error {
-		st := generateState()
-		oauthState[st] = time.Now()
-		url := ga.AuthURL(st)
-		return c.Redirect(url, http.StatusTemporaryRedirect)
-	})
-
-	app.Get("/auth/google/callback", func(c *fiber.Ctx) error {
-		state := c.Query("state")
-		if !validateState(state) {
-			return c.Status(http.StatusBadRequest).SendString("invalid state")
-		}
-		code := c.Query("code")
-		tok, err := ga.Exchange(c.Context(), code)
-		if err != nil {
-			return c.Status(http.StatusInternalServerError).SendString(err.Error())
-		}
-        // After saving token, optionally trigger re-init hook so server can pick it up without restart
-        if onAuthorized != nil {
-            go onAuthorized()
-        }
-		return c.JSON(tok)
-	})
-
-	return nil
-}
-
-func (ga *GoogleAuth) Config() *oauth2.Config {
-	return ga.config
-}
+// (Config) accessor is unused in CLI mode and intentionally omitted.

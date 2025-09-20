@@ -7,7 +7,6 @@ import (
 
 // Config holds application-wide configuration populated from environment variables.
 type Config struct {
-	Port            string
 	OpenAIAPIKey    string
 	GmailTokenPath  string
 	CredentialsPath string
@@ -18,7 +17,6 @@ type Config struct {
 // Load reads environment variables and returns Config with defaults applied.
 func Load() *Config {
 	cfg := &Config{
-		Port:            getEnv("PORT", "8080"),
 		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
 		GmailTokenPath:  getEnv("GMAIL_TOKEN", ""),
 		CredentialsPath: getEnv("GOOGLE_CREDENTIALS", ""),
