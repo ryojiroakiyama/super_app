@@ -1,19 +1,22 @@
 package main
 
 import (
-	"context"
-	"log"
+    "context"
+    "log"
+    "os"
+    "path/filepath"
+    "strings"
 
-	"gmail-tts-app/internal/config"
-	gmailrepo "gmail-tts-app/internal/infrastructure/gmail"
-	"gmail-tts-app/internal/infrastructure/googleauth"
-	"gmail-tts-app/internal/infrastructure/storage"
-	"gmail-tts-app/internal/infrastructure/tts/openai"
-	"gmail-tts-app/internal/interface/http/handler"
-	ucmsg "gmail-tts-app/internal/usecase/message"
+    "gmail-tts-app/internal/config"
+    gmailrepo "gmail-tts-app/internal/infrastructure/gmail"
+    "gmail-tts-app/internal/infrastructure/googleauth"
+    "gmail-tts-app/internal/infrastructure/storage"
+    "gmail-tts-app/internal/infrastructure/tts/openai"
+    "gmail-tts-app/internal/interface/http/handler"
+    ucmsg "gmail-tts-app/internal/usecase/message"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
+    "github.com/gofiber/fiber/v2"
+    "github.com/gofiber/fiber/v2/middleware/cors"
 )
 
 func main() {
@@ -42,7 +45,43 @@ func main() {
         store *storage.FileStore
     )
 
-    // Background job: download latest "週刊Life is beautiful" mail and TTS save
+    // Helpers for persisting processed IDs across restarts
+    downloadedFile := filepath.Join("log", "downloaded_ids.txt")
+    loadDownloadedIDs := func(path string) map[string]struct{} {
+        ids := make(map[string]struct{})
+        b, err := os.ReadFile(path)
+        if err != nil {
+            if os.IsNotExist(err) {
+                return ids
+            }
+            log.Printf("[autojob] read ids error: %v", err)
+            return ids
+        }
+        for _, line := range strings.Split(string(b), "\n") {
+            id := strings.TrimSpace(line)
+            if id != "" {
+                ids[id] = struct{}{}
+            }
+        }
+        return ids
+    }
+    appendDownloadedID := func(path, id string) {
+        if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+            log.Printf("[autojob] mkdir error: %v", err)
+            return
+        }
+        f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+        if err != nil {
+            log.Printf("[autojob] open ids file error: %v", err)
+            return
+        }
+        defer f.Close()
+        if _, err := f.WriteString(id + "\n"); err != nil {
+            log.Printf("[autojob] append id error: %v", err)
+        }
+    }
+
+    // One-shot job: download latest "週刊Life is beautiful" mail and TTS save
     startAutoDownload := func() {
         go func() {
             ctx := context.Background()
@@ -62,6 +101,11 @@ func main() {
                 return
             }
             mID := list.Messages[0].Id
+            processed := loadDownloadedIDs(downloadedFile)
+            if _, ok := processed[mID]; ok {
+                log.Printf("[autojob] latest already processed (persisted): %s", mID)
+                return
+            }
 
             if synth == nil {
                 s, err := openai.NewSynthesizer(cfg.OpenAIAPIKey)
@@ -81,6 +125,7 @@ func main() {
                 log.Printf("[autojob] tts error: %v", err)
                 return
             }
+            appendDownloadedID(downloadedFile, out.ID)
             log.Printf("[autojob] saved: %s (id=%s)", out.LocalPath, out.ID)
         }()
     }
