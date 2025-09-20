@@ -156,7 +156,7 @@ func validateState(state string) bool {
 }
 
 // RegisterOAuthRoutes adds /auth/google and /auth/google/callback
-func RegisterOAuthRoutes(app *fiber.App) error {
+func RegisterOAuthRoutes(app *fiber.App, onAuthorized func()) error {
 	ga, err := NewGoogleAuth()
 	if err != nil {
 		return err
@@ -179,6 +179,10 @@ func RegisterOAuthRoutes(app *fiber.App) error {
 		if err != nil {
 			return c.Status(http.StatusInternalServerError).SendString(err.Error())
 		}
+        // After saving token, optionally trigger re-init hook so server can pick it up without restart
+        if onAuthorized != nil {
+            go onAuthorized()
+        }
 		return c.JSON(tok)
 	})
 

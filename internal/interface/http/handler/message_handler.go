@@ -27,6 +27,13 @@ func NewMessageHandler(uc *ucmsg.GenerateAudioFromMessage, repo message.Reposito
 	return &MessageHandler{uc: uc, repo: repo, synth: synth}
 }
 
+// ReplaceDeps allows hot-swapping dependencies after authorization without restart.
+func (h *MessageHandler) ReplaceDeps(uc *ucmsg.GenerateAudioFromMessage, repo message.Repository, synth tts.Synthesizer) {
+    h.uc = uc
+    h.repo = repo
+    h.synth = synth
+}
+
 // Register registers routes to app.
 func (h *MessageHandler) Register(app *fiber.App) {
 	app.Post("/messages/:id/tts", h.generateAudio)
