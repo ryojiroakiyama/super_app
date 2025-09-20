@@ -42,6 +42,49 @@ func main() {
         store *storage.FileStore
     )
 
+    // Background job: download latest "週刊Life is beautiful" mail and TTS save
+    startAutoDownload := func() {
+        go func() {
+            ctx := context.Background()
+            srv, err := googleauth.BuildGmailService(ctx)
+            if err != nil {
+                log.Printf("[autojob] waiting for authorization: %v", err)
+                return
+            }
+            q := "subject:\"週刊Life is beautiful\""
+            list, err := srv.Users.Messages.List("me").Q(q).MaxResults(1).Do()
+            if err != nil {
+                log.Printf("[autojob] list error: %v", err)
+                return
+            }
+            if list == nil || len(list.Messages) == 0 {
+                log.Printf("[autojob] no messages found for query: %s", q)
+                return
+            }
+            mID := list.Messages[0].Id
+
+            if synth == nil {
+                s, err := openai.NewSynthesizer(cfg.OpenAIAPIKey)
+                if err != nil {
+                    log.Printf("[autojob] synth init error: %v", err)
+                    return
+                }
+                synth = s
+            }
+            if store == nil {
+                store = storage.NewFileStore(cfg.AudioDir)
+            }
+            jobRepo := gmailrepo.NewMessageRepository(srv)
+            jobUC := ucmsg.NewGenerateAudioFromMessage(jobRepo, synth, store)
+            out, err := jobUC.Execute(ctx, &ucmsg.GenerateAudioFromMessageInput{MessageID: mID})
+            if err != nil {
+                log.Printf("[autojob] tts error: %v", err)
+                return
+            }
+            log.Printf("[autojob] saved: %s (id=%s)", out.LocalPath, out.ID)
+        }()
+    }
+
     // OAuth routes with onAuthorized hook: reload token and rebuild deps
     if err := googleauth.RegisterOAuthRoutes(app, func() {
         ctx := context.Background()
@@ -60,6 +103,8 @@ func main() {
             } else {
                 log.Printf("[auth] message handler not ready; will use new deps on first init")
             }
+            // kick off auto-download job after authorization
+            startAutoDownload()
         }
     }); err != nil {
 		log.Fatalf("failed to register OAuth routes: %v", err)
@@ -97,6 +142,11 @@ func main() {
 
     mh = handler.NewMessageHandler(uc, repo, synth)
     mh.Register(app)
+
+    // Start auto-download right away if already authorized at startup
+    if repo != nil {
+        startAutoDownload()
+    }
 
     // Auth status endpoint for clients/health checks
     app.Get("/auth/status", func(c *fiber.Ctx) error {
