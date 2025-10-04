@@ -36,6 +36,15 @@ func main() {
 		return
 	}
 
+	// 2.1) Driveアップロードが有効なら、必要に応じてDriveの認証も事前に促す
+	if cfg.DriveUploadEnabled {
+		log.Printf("[drive] preflight: ensuring Drive authorization")
+		if _, err := ensureDriveService(ctx); err != nil {
+			log.Printf("[drive] drive preflight failed: %v", err)
+			return
+		}
+	}
+
 	// 3) 既定条件で最新メールIDを取得（INBOXの最新1件、検索クエリ適用）
 	q := getGmailQuery()
 	if strings.TrimSpace(q) != "" {
@@ -202,15 +211,40 @@ func uploadToDrive(ctx context.Context, cfg *config.Config, localPath string) er
 }
 
 func ensureDriveService(ctx context.Context) (*drivev3.Service, error) {
-    // Try existing token with Drive scope
+    // 既存トークンでDrive APIにアクセスできるか検証
     srv, err := googleauth.BuildDriveService(ctx)
     if err == nil {
-        // simple call to verify
         if _, e := srv.Files.List().PageSize(1).Context(ctx).Do(); e == nil {
             return srv, nil
         }
+        // 権限不足などで失敗した場合は、DriveFileスコープを含めた対話認証を実施
+        log.Printf("[drive] permission check failed. starting interactive auth for Drive...")
+        if ie := googleauth.ObtainTokenInteractiveWithScopes(ctx, gmailapi.GmailReadonlyScope, drivev3.DriveFileScope); ie != nil {
+            return nil, ie
+        }
+        // 再構築して再確認
+        srv, err = googleauth.BuildDriveService(ctx)
+        if err != nil {
+            return nil, err
+        }
+        if _, e2 := srv.Files.List().PageSize(1).Context(ctx).Do(); e2 == nil {
+            return srv, nil
+        }
+        return nil, fmt.Errorf("drive authorization failed")
     }
-    return googleauth.BuildDriveService(ctx)
+
+    // サービス構築自体に失敗した場合も、対話認証を試みる
+    if ie := googleauth.ObtainTokenInteractiveWithScopes(ctx, gmailapi.GmailReadonlyScope, drivev3.DriveFileScope); ie != nil {
+        return nil, ie
+    }
+    srv, err = googleauth.BuildDriveService(ctx)
+    if err != nil {
+        return nil, err
+    }
+    if _, e := srv.Files.List().PageSize(1).Context(ctx).Do(); e != nil {
+        return nil, e
+    }
+    return srv, nil
 }
 
 // (bulk upload helper removed)
