@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gmail-tts-app/internal/config"
+    driveuploader "gmail-tts-app/internal/infrastructure/drive"
 	"gmail-tts-app/internal/infrastructure/gmail"
 	"gmail-tts-app/internal/infrastructure/googleauth"
 	"gmail-tts-app/internal/infrastructure/storage"
@@ -19,6 +20,7 @@ import (
 	usemsg "gmail-tts-app/internal/usecase/message"
 
 	gmailapi "google.golang.org/api/gmail/v1"
+    drivev3 "google.golang.org/api/drive/v3"
 )
 
 func main() {
@@ -71,6 +73,14 @@ func main() {
 		return
 	}
 	log.Printf("[flow] saved audio to %s (bytes=%d)", out.LocalPath, len(out.Audio.Data))
+
+    // 5.1) Optionally upload merged audio to Google Drive
+    if cfg.DriveUploadEnabled {
+        log.Printf("[drive] upload enabled. uploading to Drive folder=%s", cfg.DriveFolderID)
+        if err := uploadToDrive(ctx, cfg, string(out.LocalPath)); err != nil {
+            log.Printf("[drive] upload failed: %v", err)
+        }
+    }
 
 	// 6) downloaded_ids.txt に追記
 	if err := appendDownloadedID(msgID); err != nil {
@@ -156,3 +166,51 @@ func getGmailQuery() string {
     // 既定の検索条件: 件名に「週刊Life is beautiful」
     return "subject:\"週刊Life is beautiful\""
 }
+
+// uploadToDrive uploads the given local file path to Drive. It tries existing token first.
+func uploadToDrive(ctx context.Context, cfg *config.Config, localPath string) error {
+    // Ensure service with current token and scopes
+    srv, err := ensureDriveService(ctx)
+    if err != nil {
+        return err
+    }
+    uploader := driveuploader.NewUploader(srv)
+    dstName := filepath.Base(localPath)
+
+    id, link, err := uploader.UploadFile(ctx, localPath, dstName, cfg.DriveFolderID)
+    if err == nil {
+        log.Printf("[drive] uploaded: id=%s link=%s", id, link)
+        return nil
+    }
+    // If failed, attempt interactive re-auth with Drive scope once
+    log.Printf("[drive] upload error (%v). trying interactive auth...", err)
+    if e := googleauth.ObtainTokenInteractiveWithScopes(ctx, gmailapi.GmailReadonlyScope, drivev3.DriveFileScope); e != nil {
+        return e
+    }
+    // Build service again and retry once
+    srv, err = googleauth.BuildDriveService(ctx)
+    if err != nil {
+        return err
+    }
+    uploader = driveuploader.NewUploader(srv)
+    id, link, err = uploader.UploadFile(ctx, localPath, dstName, cfg.DriveFolderID)
+    if err != nil {
+        return err
+    }
+    log.Printf("[drive] uploaded: id=%s link=%s", id, link)
+    return nil
+}
+
+func ensureDriveService(ctx context.Context) (*drivev3.Service, error) {
+    // Try existing token with Drive scope
+    srv, err := googleauth.BuildDriveService(ctx)
+    if err == nil {
+        // simple call to verify
+        if _, e := srv.Files.List().PageSize(1).Context(ctx).Do(); e == nil {
+            return srv, nil
+        }
+    }
+    return googleauth.BuildDriveService(ctx)
+}
+
+// (bulk upload helper removed)

@@ -1,20 +1,21 @@
 package googleauth
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "math/rand"
-    "net"
-    "net/http"
-    "os"
-    "path/filepath"
-    "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math/rand"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
 
-    "golang.org/x/oauth2"
-    "golang.org/x/oauth2/google"
-    "google.golang.org/api/gmail/v1"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/gmail/v1"
 )
 
 const (
@@ -52,6 +53,34 @@ func NewGoogleAuth() (*GoogleAuth, error) {
         config.RedirectURL = "http://localhost:8080/auth/google/callback"
     }
 	return &GoogleAuth{config: config}, nil
+}
+
+// NewGoogleAuthWithScopes creates GoogleAuth with specified OAuth scopes.
+func NewGoogleAuthWithScopes(scopes ...string) (*GoogleAuth, error) {
+    credPath := os.Getenv("GOOGLE_CREDENTIALS")
+    if credPath == "" {
+        secretsDir := os.Getenv("SECRETS_DIR")
+        if secretsDir == "" {
+            secretsDir = "secrets"
+        }
+        credPath = filepath.Join(secretsDir, credentialsFile)
+    }
+    b, err := os.ReadFile(credPath)
+    if err != nil {
+        return nil, fmt.Errorf("unable to read client secret file: %w", err)
+    }
+    if len(scopes) == 0 {
+        scopes = []string{gmail.GmailReadonlyScope}
+    }
+    config, err := google.ConfigFromJSON(b, scopes...)
+    if err != nil {
+        return nil, fmt.Errorf("unable to parse client secret file to config: %w", err)
+    }
+    log.Printf("[auth] using credentials: %s", credPath)
+    if config.RedirectURL == "" {
+        config.RedirectURL = "http://localhost:8080/auth/google/callback"
+    }
+    return &GoogleAuth{config: config}, nil
 }
 
 // AuthURL generates Google OAuth consent URL.
@@ -143,6 +172,74 @@ func ObtainTokenInteractive(ctx context.Context) error {
     return nil
 }
 
+// ObtainTokenInteractiveWithScopes runs interactive OAuth consent for specified scopes and saves token.
+func ObtainTokenInteractiveWithScopes(ctx context.Context, scopes ...string) error {
+    ga, err := NewGoogleAuthWithScopes(scopes...)
+    if err != nil {
+        return err
+    }
+
+    ln, err := net.Listen("tcp", "127.0.0.1:8080")
+    if err != nil {
+        return fmt.Errorf("listen 127.0.0.1:8080: %w", err)
+    }
+    defer ln.Close()
+
+    host := os.Getenv("GOOGLE_LOOPBACK_HOST")
+    if host == "" {
+        host = "localhost"
+    }
+    addr := host + ":8080"
+
+    callbackPath := "/auth/google/callback"
+    if p := os.Getenv("GOOGLE_CALLBACK_PATH"); p != "" {
+        callbackPath = p
+    }
+    redirectURL := fmt.Sprintf("http://%s%s", addr, callbackPath)
+    ga.SetRedirectURL(redirectURL)
+
+    rand.Seed(time.Now().UnixNano())
+    state := fmt.Sprintf("st-%d", rand.Int63())
+
+    url := ga.AuthURL(state)
+    log.Printf("[auth] Open this URL to authorize (scopes=%v):\n%s", scopes, url)
+
+    codeCh := make(chan string, 1)
+    srv := &http.Server{}
+    mux := http.NewServeMux()
+    mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Query().Get("state") != state {
+            http.Error(w, "state mismatch", http.StatusBadRequest)
+            return
+        }
+        code := r.URL.Query().Get("code")
+        if code == "" {
+            http.Error(w, "code missing", http.StatusBadRequest)
+            return
+        }
+        fmt.Fprint(w, "Authorization received. You can close this tab.")
+        codeCh <- code
+    })
+    srv.Handler = mux
+
+    go func() { _ = srv.Serve(ln) }()
+
+    var code string
+    select {
+    case code = <-codeCh:
+    case <-time.After(5 * time.Minute):
+        _ = srv.Close()
+        return fmt.Errorf("authorization timeout")
+    }
+
+    if _, err := ga.Exchange(ctx, code); err != nil {
+        _ = srv.Close()
+        return err
+    }
+    _ = srv.Close()
+    return nil
+}
+
 // Exchange exchanges code to token and persist it.
 func (ga *GoogleAuth) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
 	tok, err := ga.config.Exchange(ctx, code)
@@ -210,6 +307,26 @@ func BuildGmailService(ctx context.Context) (*gmail.Service, error) {
 		return nil, err
 	}
 	return GmailServiceFromToken(ctx, tok, ga.config)
+}
+
+// DriveServiceFromToken builds Drive service from token and oauth config.
+func DriveServiceFromToken(ctx context.Context, token *oauth2.Token, config *oauth2.Config) (*drive.Service, error) {
+    client := config.Client(ctx, token)
+    return drive.New(client)
+}
+
+// BuildDriveService loads token and credentials then builds Drive API service (DriveFile scope).
+func BuildDriveService(ctx context.Context) (*drive.Service, error) {
+    tok, err := TokenFromFile()
+    if err != nil {
+        return nil, err
+    }
+    // Request both Gmail readonly and Drive file scopes to allow unified token reuse
+    ga, err := NewGoogleAuthWithScopes(gmail.GmailReadonlyScope, drive.DriveFileScope)
+    if err != nil {
+        return nil, err
+    }
+    return DriveServiceFromToken(ctx, tok, ga.config)
 }
 
 // (Config) accessor is unused in CLI mode and intentionally omitted.
