@@ -1,4 +1,5 @@
+.env
 secrets/
 audio/
-.env
-log/downloaded_ids.txt
+text/
+log/
