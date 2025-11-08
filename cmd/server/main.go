@@ -19,15 +19,13 @@ import (
 
 	"gmail-tts-app/internal/config"
 	"gmail-tts-app/internal/domain/message"
-    driveuploader "gmail-tts-app/internal/infrastructure/drive"
+	driveuploader "gmail-tts-app/internal/infrastructure/drive"
 	"gmail-tts-app/internal/infrastructure/gmail"
 	"gmail-tts-app/internal/infrastructure/googleauth"
-	"gmail-tts-app/internal/infrastructure/storage"
 	openaitts "gmail-tts-app/internal/infrastructure/tts/openai"
-	usemsg "gmail-tts-app/internal/usecase/message"
 
 	gmailapi "google.golang.org/api/gmail/v1"
-    drivev3 "google.golang.org/api/drive/v3"
+	drivev3 "google.golang.org/api/drive/v3"
 )
 
 func main() {
@@ -36,21 +34,7 @@ func main() {
 
 	log.Printf("[flow] starting run flow")
 
-	// 1. テキスト変換処理：raw_txt → podcast_txt（スキップ：既に変換済み）
-	messageID := "19a4bcdb62b16afe"
-	
-	// 2. TTS処理：podcast_txt → audio
-	podcastDir := filepath.Join("text", "podcast_txt", messageID)
-	log.Printf("[flow] processing TTS from podcast files")
-	if err := processTTSFromPodcastFiles(ctx, podcastDir, messageID, cfg.OpenAIAPIKey); err != nil {
-		log.Printf("[flow] failed to process TTS: %v", err)
-		return
-	}
-	
-	log.Printf("[flow] all processing completed. exiting.")
-	return
-
-	// 以下、Gmail取得からの処理（現在はスキップ）
+	// Gmail取得からの完全なフロー
 	// 1-2) Gmailアクセス可否を確認し、必要なら認証を促す
 	srv, err := ensureGmailService(ctx)
 	if err != nil {
@@ -107,43 +91,24 @@ func main() {
 		return
 	}
 
-	// downloaded_ids.txt に記録して終了
-	if err := appendDownloadedID(msgID); err != nil {
-		log.Printf("[flow] failed to append downloaded id: %v", err)
-		return
-	}
-	log.Printf("[flow] message saved and converted to podcast. exiting.")
-	return
-
-	// 5) ダウンロード開始（本文取得→TTS→保存）
-	repo := gmail.NewMessageRepository(srv)
-	synth, err := openaitts.NewSynthesizer(cfg.OpenAIAPIKey)
+	// 5) TTS処理：podcast_txt → audio
+	podcastDir := filepath.Join("text", "podcast_txt", msgID)
+	log.Printf("[flow] processing TTS from podcast files")
+	mergedAudioPath, err := processTTSFromPodcastFiles(ctx, podcastDir, msgID, msg.Subject, cfg.OpenAIAPIKey)
 	if err != nil {
-		log.Printf("[tts] synthesizer init error: %v", err)
+		log.Printf("[flow] failed to process TTS: %v", err)
 		return
 	}
-	store := storage.NewFileStore(cfg.AudioDir)
-	uc := usemsg.NewGenerateAudioFromMessage(repo, synth, store)
 
-	log.Printf("[flow] start synthesis for %s", msgID)
-	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	out, err := uc.Execute(ctxTimeout, &usemsg.GenerateAudioFromMessageInput{MessageID: msgID, LimitChars: 0})
-	if err != nil {
-		log.Printf("[flow] synthesis error: %v", err)
-		return
+	// 6) Google Drive へアップロード
+	if cfg.DriveUploadEnabled {
+		log.Printf("[drive] upload enabled. uploading to Drive folder=%s", cfg.DriveFolderID)
+		if err := uploadToDrive(ctx, cfg, mergedAudioPath); err != nil {
+			log.Printf("[drive] upload failed: %v", err)
+		}
 	}
-	log.Printf("[flow] saved audio to %s (bytes=%d)", out.LocalPath, len(out.Audio.Data))
 
-    // 5.1) Optionally upload merged audio to Google Drive
-    if cfg.DriveUploadEnabled {
-        log.Printf("[drive] upload enabled. uploading to Drive folder=%s", cfg.DriveFolderID)
-        if err := uploadToDrive(ctx, cfg, string(out.LocalPath)); err != nil {
-            log.Printf("[drive] upload failed: %v", err)
-        }
-    }
-
-	// 6) downloaded_ids.txt に追記
+	// 7) downloaded_ids.txt に記録
 	if err := appendDownloadedID(msgID); err != nil {
 		log.Printf("[flow] failed to append downloaded id: %v", err)
 		return
@@ -185,7 +150,7 @@ func latestMessageID(ctx context.Context, srv *gmailapi.Service, query string) (
 }
 
 func downloadedLogPath() string {
-	return filepath.Join("log", "downloaded_ids.txt")
+	return "procced_mail_ids.txt"
 }
 
 func alreadyDownloaded(id string) bool {
@@ -466,31 +431,32 @@ func processSinglePart(ctx context.Context, filePath, messageID, apiKey string) 
 }
 
 // processTTSFromPodcastFiles reads podcast files and generates TTS audio
-func processTTSFromPodcastFiles(ctx context.Context, podcastDir, messageID, apiKey string) error {
+// Returns the path to the merged audio file
+func processTTSFromPodcastFiles(ctx context.Context, podcastDir, messageID, subject, apiKey string) (string, error) {
     log.Printf("[tts] processing podcast files in %s", podcastDir)
 
     // 1. podcast_txtディレクトリ内のファイルを取得し、part順でソート
     files, err := getPodcastFilesInOrder(podcastDir)
     if err != nil {
-        return fmt.Errorf("get podcast files: %w", err)
+        return "", fmt.Errorf("get podcast files: %w", err)
     }
     log.Printf("[tts] found %d podcast files", len(files))
 
     // 2. 出力ディレクトリを作成
     partsDir := filepath.Join("audio", "parts", messageID)
     if err := os.MkdirAll(partsDir, 0o755); err != nil {
-        return fmt.Errorf("create parts dir: %w", err)
+        return "", fmt.Errorf("create parts dir: %w", err)
     }
 
     mergedDir := filepath.Join("audio", "merged", messageID)
     if err := os.MkdirAll(mergedDir, 0o755); err != nil {
-        return fmt.Errorf("create merged dir: %w", err)
+        return "", fmt.Errorf("create merged dir: %w", err)
     }
 
     // 3. 各ファイルをTTS処理
     synth, err := openaitts.NewSynthesizer(apiKey)
     if err != nil {
-        return fmt.Errorf("create synthesizer: %w", err)
+        return "", fmt.Errorf("create synthesizer: %w", err)
     }
 
     var allAudioData []byte
@@ -501,7 +467,7 @@ func processTTSFromPodcastFiles(ctx context.Context, podcastDir, messageID, apiK
         // ファイルを読み込む
         content, err := os.ReadFile(file)
         if err != nil {
-            return fmt.Errorf("read file %s: %w", file, err)
+            return "", fmt.Errorf("read file %s: %w", file, err)
         }
 
         textContent := string(content)
@@ -512,14 +478,14 @@ func processTTSFromPodcastFiles(ctx context.Context, podcastDir, messageID, apiK
         audio, err := synth.Synthesize(ttsCtx, textContent)
         cancel()
         if err != nil {
-            return fmt.Errorf("synthesize file %s: %w", file, err)
+            return "", fmt.Errorf("synthesize file %s: %w", file, err)
         }
 
         // 個別ファイルとして保存
         partFileName := fmt.Sprintf("part%d.mp3", i+1)
         partPath := filepath.Join(partsDir, partFileName)
         if err := os.WriteFile(partPath, audio.Data, 0o644); err != nil {
-            return fmt.Errorf("write part file: %w", err)
+            return "", fmt.Errorf("write part file: %w", err)
         }
         log.Printf("[tts] saved part %d to %s (size: %d bytes)", i+1, partPath, len(audio.Data))
 
@@ -527,15 +493,16 @@ func processTTSFromPodcastFiles(ctx context.Context, podcastDir, messageID, apiK
         allAudioData = append(allAudioData, audio.Data...)
     }
 
-    // 4. 全パートをマージして保存
-    mergedFileName := fmt.Sprintf("%s_merged.mp3", messageID)
+    // 4. 全パートをマージして保存（ファイル名にSubjectとMessageIDを含める）
+    safeSubject := sanitizeFilename(subject)
+    mergedFileName := fmt.Sprintf("%s_%s.mp3", safeSubject, messageID)
     mergedPath := filepath.Join(mergedDir, mergedFileName)
     if err := os.WriteFile(mergedPath, allAudioData, 0o644); err != nil {
-        return fmt.Errorf("write merged file: %w", err)
+        return "", fmt.Errorf("write merged file: %w", err)
     }
     log.Printf("[tts] saved merged audio to %s (total size: %d bytes)", mergedPath, len(allAudioData))
 
-    return nil
+    return mergedPath, nil
 }
 
 // getPodcastFilesInOrder returns podcast files sorted by part number
