@@ -36,20 +36,12 @@ func main() {
 
 	log.Printf("[flow] starting run flow")
 
-	// 1. テキスト変換処理：raw_txt → podcast_txt
+	// 1. テキスト変換処理：raw_txt → podcast_txt（スキップ：既に変換済み）
 	messageID := "19a4bcdb62b16afe"
-	textFilePath := "text/raw_txt/19a4bcdb62b16afe/週刊Life is beautiful ２０２５年１１月３日号：MulmoCast、MicrosoftとOpenAIの関係、米中冷戦は、日本にとってのビジネスチャンス、変異しつつあるITビジネス_19a4bcdb62b16afe.txt"
 	
-	log.Printf("[flow] step 1: converting text file to podcast format")
-	if err := convertToPodcast(ctx, textFilePath, cfg.OpenAIAPIKey); err != nil {
-		log.Printf("[flow] failed to convert to podcast: %v", err)
-		return
-	}
-	log.Printf("[flow] podcast conversion completed")
-
 	// 2. TTS処理：podcast_txt → audio
 	podcastDir := filepath.Join("text", "podcast_txt", messageID)
-	log.Printf("[flow] step 2: processing TTS from podcast files")
+	log.Printf("[flow] processing TTS from podcast files")
 	if err := processTTSFromPodcastFiles(ctx, podcastDir, messageID, cfg.OpenAIAPIKey); err != nil {
 		log.Printf("[flow] failed to process TTS: %v", err)
 		return
@@ -428,6 +420,49 @@ func convertToPodcast(ctx context.Context, textFilePath string, apiKey string) e
 
     log.Printf("[podcast] all chunks converted and saved")
     return nil
+}
+
+// processSinglePart processes a single podcast file and generates TTS audio
+func processSinglePart(ctx context.Context, filePath, messageID, apiKey string) error {
+	log.Printf("[tts] processing single file: %s", filepath.Base(filePath))
+
+	// 出力ディレクトリを作成
+	partsDir := filepath.Join("audio", "parts", messageID)
+	if err := os.MkdirAll(partsDir, 0o755); err != nil {
+		return fmt.Errorf("create parts dir: %w", err)
+	}
+
+	// ファイルを読み込む
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read file %s: %w", filePath, err)
+	}
+
+	textContent := string(content)
+	log.Printf("[tts] file size: %d chars", len([]rune(textContent)))
+
+	// TTS処理
+	synth, err := openaitts.NewSynthesizer(apiKey)
+	if err != nil {
+		return fmt.Errorf("create synthesizer: %w", err)
+	}
+
+	ttsCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	audio, err := synth.Synthesize(ttsCtx, textContent)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("synthesize file %s: %w", filePath, err)
+	}
+
+	// 個別ファイルとして保存
+	partFileName := "part1.mp3"
+	partPath := filepath.Join(partsDir, partFileName)
+	if err := os.WriteFile(partPath, audio.Data, 0o644); err != nil {
+		return fmt.Errorf("write part file: %w", err)
+	}
+	log.Printf("[tts] saved part1 to %s (size: %d bytes)", partPath, len(audio.Data))
+
+	return nil
 }
 
 // processTTSFromPodcastFiles reads podcast files and generates TTS audio

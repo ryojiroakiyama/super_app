@@ -1,6 +1,7 @@
 package config
 
 import (
+    "encoding/json"
     "os"
     "path/filepath"
 
@@ -16,6 +17,14 @@ type Config struct {
 	SecretsDir      string
     DriveUploadEnabled bool
     DriveFolderID      string
+}
+
+// TTSConfig holds TTS-specific configuration from tts.config file.
+type TTSConfig struct {
+	Model          string  `json:"model"`
+	Voice          string  `json:"voice"`
+	Speed          float64 `json:"speed"`
+	ResponseFormat string  `json:"response_format"`
 }
 
 // Load reads environment variables and returns Config with defaults applied.
@@ -60,4 +69,20 @@ func getEnvBool(key string, def bool) bool {
     default:
         return def
     }
+}
+
+// LoadTTSConfig reads TTS configuration from prompt/tts.config file.
+func LoadTTSConfig() (*TTSConfig, error) {
+	configPath := filepath.Join("prompt", "tts.config")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg TTSConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
 }

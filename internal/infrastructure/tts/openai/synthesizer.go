@@ -12,14 +12,17 @@ import (
     "strings"
     "time"
 
+    "gmail-tts-app/internal/config"
     "gmail-tts-app/internal/domain/tts"
 )
 
 // Synthesizer implements tts.Synthesizer using OpenAI TTS endpoint.
 type Synthesizer struct {
-	apiKey string
-	voice  string
-	model  string
+	apiKey         string
+	voice          string
+	model          string
+	speed          float64
+	responseFormat string
 }
 
 // NewSynthesizer creates OpenAI TTS synthesizer.
@@ -31,18 +34,44 @@ func NewSynthesizer(apiKey string) (*Synthesizer, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("openai api key is required")
 	}
-	return &Synthesizer{apiKey: apiKey, voice: "alloy", model: "tts-1"}, nil
+
+	// Load TTS configuration from tts.config file
+	ttsConfig, err := config.LoadTTSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TTS config: %w", err)
+	}
+
+	return &Synthesizer{
+		apiKey:         apiKey,
+		voice:          ttsConfig.Voice,
+		model:          ttsConfig.Model,
+		speed:          ttsConfig.Speed,
+		responseFormat: ttsConfig.ResponseFormat,
+	}, nil
 }
 
 // Synthesize converts text to audio bytes (mp3).
 func (s *Synthesizer) Synthesize(ctx context.Context, text string) (*tts.Audio, error) {
 	payload := map[string]interface{}{
-		"model":  s.model,
-		"input":  text,
-		"voice":  s.voice,
-		"format": "mp3",
+		"model":           s.model,
+		"input":           text,
+		"voice":           s.voice,
+		"speed":           s.speed,
+		"response_format": s.responseFormat,
 	}
 	body, _ := json.Marshal(payload)
+
+	// Log TTS execution start
+	textLen := len([]rune(text))
+	fmt.Printf("[tts] Starting OpenAI TTS synthesis...\n")
+	fmt.Printf("[tts]   - Model: %s\n", s.model)
+	fmt.Printf("[tts]   - Voice: %s\n", s.voice)
+	fmt.Printf("[tts]   - Speed: %.1f\n", s.speed)
+	fmt.Printf("[tts]   - Format: %s\n", s.responseFormat)
+	fmt.Printf("[tts]   - Text length: %d characters\n", textLen)
+	fmt.Printf("[tts] Sending request to OpenAI API...\n")
+
+	startTime := time.Now()
 
 	// adopt timeout from ctx or fallback to 90s
 	reqCtx := ctx
@@ -68,10 +97,19 @@ func (s *Synthesizer) Synthesize(ctx context.Context, text string) (*tts.Audio, 
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("openai error %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
+	
+	fmt.Printf("[tts] Response received, reading audio data...\n")
+	
 	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
+	
+	duration := time.Since(startTime)
+	fmt.Printf("[tts] TTS synthesis completed successfully!\n")
+	fmt.Printf("[tts]   - Audio size: %d bytes (%.2f KB)\n", len(audioBytes), float64(len(audioBytes))/1024)
+	fmt.Printf("[tts]   - Processing time: %.2f seconds\n", duration.Seconds())
+	
 	return &tts.Audio{Data: audioBytes, Format: "mp3"}, nil
 }
 // Stream synth is unused in CLI mode and intentionally omitted.
